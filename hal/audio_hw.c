@@ -2606,9 +2606,12 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
                 struct stream_in *voip_in = get_voice_communication_input(adev);
                 out_snd_device = platform_get_output_snd_device(adev->platform,
                                                                 usecase->stream.out);
+                // Claim on start and on arrival from another backend (DAC switched on, headset
+                // plugged in): the amplifier moves headphones to the DAC only after this
                 out_snd_device = hifi_dac_dop_snd_device(adev, usecase->stream.out,
-                                                         out_snd_device,
-                                                         usecase->out_snd_device == SND_DEVICE_NONE);
+                        out_snd_device,
+                        usecase->out_snd_device == SND_DEVICE_NONE ||
+                        platform_get_backend_index(usecase->out_snd_device) != HIFI_DAC_RX_BACKEND);
                 voip_usecase = get_usecase_from_list(adev, USECASE_AUDIO_PLAYBACK_VOIP);
 
                 if (voip_usecase)
