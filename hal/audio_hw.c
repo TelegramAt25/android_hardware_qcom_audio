@@ -99,6 +99,11 @@
 #define HIFI_DAC_ATTEN_CTL "Es9018 Playback Attenuation"
 #define HIFI_DAC_DOP_CTL "Es9018 Dop"
 #define HIFI_DAC_ENABLED_PROP "persist.vendor.audio.hifi.enabled"
+/* DSP soft volume ramp (SOFT_VOLUME_PERIOD 30 ms) plus the audio already past it */
+#define HIFI_DAC_DSP_RAMP_US 100000
+/* The DAC ramps its volume at 2^3 x fs / 512 dB/s (R6 0x43), slowest at 44.1 kHz: 689 dB/s */
+#define HIFI_DAC_RAMP_US_PER_STEP 726
+#define HIFI_DAC_RAMP_MAX_US 200000
 #define DOP_MARKER_A 0x05
 #define DOP_MARKER_B 0xFA
 /* DAC volume ramp to mute, and the DSP's soft resume ramp plus the DAC's DoP relock (by ear) */
@@ -5238,6 +5243,10 @@ static struct stream_out *hifi_dac_volume_owner(struct audio_device *adev,
     snd_device_t snd;
     int playing = 0;
 
+    // Switched off: headphones still map to the DAC until the amplifier moves them, after routing
+    if (!property_get_bool(HIFI_DAC_ENABLED_PROP, false))
+        return NULL;
+
     list_for_each(node, &adev->usecase_list) {
         uc = node_to_item(node, struct audio_usecase, list);
         snd = uc == pending ? pending_snd : uc->out_snd_device;
@@ -5263,13 +5272,25 @@ static struct stream_out *hifi_dac_volume_owner(struct audio_device *adev,
     return playing == 1 ? owner : NULL;
 }
 
+static long hifi_dac_min_atten(const struct audio_device *adev)
+{
+    return adev->hifi_dac_atten[0] < adev->hifi_dac_atten[1] ? adev->hifi_dac_atten[0] :
+                                                               adev->hifi_dac_atten[1];
+}
+
 /* Called with adev->lock held */
 static void hifi_dac_update_volume(struct audio_device *adev, struct audio_usecase *pending,
                                    snd_device_t pending_snd, bool acquire)
 {
     struct stream_out *prev = adev->hifi_dac_vol_out;
     struct stream_out *owner = hifi_dac_volume_owner(adev, pending, pending_snd);
+    long old_atten;
 
+    // About to be routed alone to the DAC: start the DAC at its volume, the DSP still has it too
+    if (owner && owner != prev && !acquire && !prev) {
+        hifi_dac_set_atten(adev, owner->volume_l, owner->volume_r);
+        return;
+    }
     if (owner != prev && !acquire)
         owner = NULL;
 
@@ -5281,6 +5302,7 @@ static void hifi_dac_update_volume(struct audio_device *adev, struct audio_useca
         ALOGD("%s: DSP volume back for usecase %s", __func__, use_case_table[prev->usecase]);
     }
     if (owner) {
+        old_atten = adev->hifi_dac_atten_known ? hifi_dac_min_atten(adev) : 0;
         if (!hifi_dac_set_atten(adev, owner->volume_l, owner->volume_r)) {
             if (owner == prev) {
                 adev->hifi_dac_vol_out = NULL;
@@ -5290,13 +5312,27 @@ static void hifi_dac_update_volume(struct audio_device *adev, struct audio_useca
             return;
         }
         if (owner != prev) {
+            // The DAC ramps down slower than the DSP ramps up: let it get there first
+            long steps = hifi_dac_min_atten(adev) - old_atten;
+            if (steps > 0)
+                usleep(steps * HIFI_DAC_RAMP_US_PER_STEP < HIFI_DAC_RAMP_MAX_US ?
+                       steps * HIFI_DAC_RAMP_US_PER_STEP : HIFI_DAC_RAMP_MAX_US);
             adev->hifi_dac_vol_out = owner;
             if (!owner->a2dp_compress_mute)
                 out_set_compr_volume(&owner->stream, owner->volume_l, owner->volume_r);
             ALOGD("%s: Hi-Fi DAC volume for usecase %s", __func__, use_case_table[owner->usecase]);
         }
+    } else if (!property_get_bool(HIFI_DAC_ENABLED_PROP, false) ||
+               (pending && platform_get_backend_index(pending_snd) != HIFI_DAC_RX_BACKEND)) {
+        // Leaving the DAC: keep attenuating there until audio processed at unity has played out,
+        // or the new route gets it first
+        if (prev)
+            usleep(HIFI_DAC_DSP_RAMP_US);
     } else if (prev || !adev->hifi_dac_atten_known ||
                adev->hifi_dac_atten[0] || adev->hifi_dac_atten[1]) {
+        // Staying on the DAC: the DSP ramps its volume down (SOFT_VOLUME_PERIOD 30 ms), the DAC jumps
+        if (prev)
+            usleep(HIFI_DAC_DSP_RAMP_US);
         if (mixer_get_ctl_by_name(adev->mixer, HIFI_DAC_ATTEN_CTL))
             hifi_dac_set_atten(adev, 1.0f, 1.0f);
         else
