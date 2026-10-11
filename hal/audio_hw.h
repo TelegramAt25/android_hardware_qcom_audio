@@ -588,7 +588,7 @@ struct audio_device {
     struct stream_out *hifi_dac_vol_out;
     int hifi_dac_atten[2];
     bool hifi_dac_atten_known;
-    /* Stream that owns the Hi-Fi DAC's DoP port; the DAC's other streams are cut off */
+    /* Stream that owns the Hi-Fi DAC's DoP port: DoP cuts the DAC's other streams off, PCM mixes them */
     struct stream_out *hifi_dac_dop_out;
     struct stream_out *voice_tx_output;
     struct stream_out *current_call_output;

@@ -2779,7 +2779,7 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
         if (platform_check_codec_asrc_support(adev->platform))
             check_and_set_asrc_mode(adev, usecase, out_snd_device);
         enable_snd_device(adev, out_snd_device);
-        /* The DAC's I2S port is down now; set DoP up before its port starts */
+        /* The DAC's I2S port is down now; set DoP (or PCM) up before its port starts */
         if (out_snd_device == SND_DEVICE_OUT_HEADPHONES_DOP && usecase->type == PCM_PLAYBACK &&
                 usecase->stream.out == adev->hifi_dac_dop_out)
             hifi_dac_set_dop(adev, usecase->stream.out->dop);
@@ -5305,7 +5305,9 @@ static void hifi_dac_update_volume(struct audio_device *adev, struct audio_useca
  * DoP on the Hi-Fi DAC: a direct stream whose writes carry DoP markers gets the
  * DAC's DoP port (the DAC is clock master there) and the DAC is set to DoP before
  * that port starts. The port shares the DAC's I2S pins, so while it plays, the
- * DAC's other streams go to the same sound device but stay unrouted.
+ * DAC's other streams go to the same sound device but stay unrouted. A direct
+ * 352.8 kHz PCM stream (no MI2S bit clock for it) owns the port the same way, but
+ * the other streams are mixed in there by the DSP.
  */
 enum {
     DOP_SCAN_PCM,
@@ -5322,6 +5324,13 @@ static bool hifi_dac_dop_capable(const struct stream_out *out)
            (out->format == AUDIO_FORMAT_PCM_24_BIT_PACKED ||
             out->format == AUDIO_FORMAT_PCM_8_24_BIT ||
             out->format == AUDIO_FORMAT_PCM_32_BIT);
+}
+
+/* 352.8 kHz PCM for the DoP port, the DAC clocks it as with DoP128 */
+static bool hifi_dac_tdm_pcm(const struct stream_out *out)
+{
+    return !out->dop && out->sample_rate == 352800 && hifi_dac_dop_capable(out) &&
+           property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true);
 }
 
 /* DoP: both channels of a frame carry the same marker byte on top, 0x05 and 0xFA in turn */
@@ -5373,18 +5382,19 @@ static snd_device_t hifi_dac_dop_snd_device(struct audio_device *adev, struct st
             platform_get_backend_index(SND_DEVICE_OUT_HEADPHONES_DOP) != HIFI_DAC_RX_BACKEND ||
             !property_get_bool(HIFI_DAC_ENABLED_PROP, false))
         return snd_device;
-    if (claim && out && out->dop && !adev->hifi_dac_dop_out) {
+    if (claim && out && (out->dop || hifi_dac_tdm_pcm(out)) && !adev->hifi_dac_dop_out) {
         adev->hifi_dac_dop_out = out;
-        ALOGD("%s: DoP%d stream takes the Hi-Fi DAC", __func__, out->dop);
+        ALOGD("%s: DoP%d (0 = PCM) stream takes the Hi-Fi DAC", __func__, out->dop);
     }
     return adev->hifi_dac_dop_out ? SND_DEVICE_OUT_HEADPHONES_DOP : snd_device;
 }
 
-/* Only the DoP stream is routed to the DoP port */
+/* Only the DoP stream is routed to the DoP port; PCM there is mixed */
 static bool hifi_dac_dop_cut_off(struct audio_device *adev, struct audio_usecase *usecase)
 {
     if (usecase->type == PCM_CAPTURE ||
             usecase->out_snd_device != SND_DEVICE_OUT_HEADPHONES_DOP ||
+            (adev->hifi_dac_dop_out && !adev->hifi_dac_dop_out->dop) ||
             (usecase->type == PCM_PLAYBACK && adev->hifi_dac_dop_out &&
              usecase->stream.out == adev->hifi_dac_dop_out))
         return false;
@@ -5398,7 +5408,8 @@ static bool hifi_dac_dop_blocks(struct audio_device *adev, struct stream_out *ou
     bool blocks;
 
     pthread_mutex_lock(&adev->lock);
-    blocks = adev->hifi_dac_dop_out && adev->hifi_dac_dop_out != out &&
+    blocks = adev->hifi_dac_dop_out && adev->hifi_dac_dop_out->dop &&
+             adev->hifi_dac_dop_out != out &&
              hifi_dac_dop_snd_device(adev, out,
                                      platform_get_output_snd_device(adev->platform, out),
                                      false) == SND_DEVICE_OUT_HEADPHONES_DOP;
@@ -5416,7 +5427,7 @@ static bool hifi_dac_dop_mute(struct stream_out *out, bool mute)
     bool owner;
 
     pthread_mutex_lock(&adev->lock);
-    owner = out == adev->hifi_dac_dop_out && out == adev->hifi_dac_vol_out;
+    owner = out->dop && out == adev->hifi_dac_dop_out && out == adev->hifi_dac_vol_out;
     if (owner) {
         if (mute)
             hifi_dac_set_atten(adev, 0.0f, 0.0f);
@@ -5458,8 +5469,9 @@ static void hifi_dac_check_link(struct audio_device *adev)
         return;
     platform_get_codec_backend_cfg(adev, out_uc->out_snd_device, &cfg);
     rate = out->sample_rate;
-    // MI2S runs 352.8 kHz at 176.4 kHz
-    if ((cfg.sample_rate == rate || (rate == 352800 && cfg.sample_rate == 176400)) &&
+    // MI2S runs 352.8 kHz at 176.4 kHz; alone, the stream can have the DoP port instead
+    if ((cfg.sample_rate == rate ||
+         (rate == 352800 && cfg.sample_rate == 176400 && !hifi_dac_tdm_pcm(out))) &&
             cfg.bit_width >= out->bit_width)
         return;
     ALOGD("%s: usecase %s at %u Hz/%u-bit alone on a %u Hz/%u-bit link, restarting it",
@@ -5473,10 +5485,10 @@ static void hifi_dac_dop_release(struct audio_device *adev)
     struct audio_usecase *uc;
     struct listnode *node;
 
-    ALOGD("%s: DoP%d stream leaves the Hi-Fi DAC", __func__, adev->hifi_dac_dop_out->dop);
+    ALOGD("%s: DoP%d (0 = PCM) stream leaves the Hi-Fi DAC", __func__, adev->hifi_dac_dop_out->dop);
     adev->hifi_dac_dop_out = NULL;
     hifi_dac_set_dop(adev, 0);
-    // The streams that were cut off go back to the DAC's I2S port
+    // The streams that were cut off or mixed in go back to the DAC's I2S port
     list_for_each(node, &adev->usecase_list) {
         uc = node_to_item(node, struct audio_usecase, list);
         if (uc->type == PCM_PLAYBACK && uc->out_snd_device == SND_DEVICE_OUT_HEADPHONES_DOP)

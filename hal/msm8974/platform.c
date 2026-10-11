@@ -8679,7 +8679,7 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
     // default backend
     // force routing is not required here, caller will do it anyway
     if (snd_device == SND_DEVICE_OUT_HEADPHONES_DOP && adev->hifi_dac_dop_out) {
-        /* Only the DoP stream reaches the DoP port */
+        /* The port runs at its owner's format: DoP alone, or 352.8 kHz PCM with the rest mixed in */
         bit_width = adev->hifi_dac_dop_out->bit_width;
         sample_rate = adev->hifi_dac_dop_out->sample_rate;
         channels = audio_channel_count_from_out_mask(adev->hifi_dac_dop_out->channel_mask);
