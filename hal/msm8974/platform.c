@@ -592,6 +592,7 @@ static const char * device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_BUS_NAV] = "bus-speaker",
     [SND_DEVICE_OUT_BUS_PHN] = "bus-speaker",
     [SND_DEVICE_OUT_ULTRASOUND_HANDSET] = "ultrasound-handset",
+    [SND_DEVICE_OUT_HEADPHONES_DOP] = "headphones-dop",
 
     /* Capture sound devices */
     [SND_DEVICE_IN_HANDSET_MIC] = "handset-mic",
@@ -780,6 +781,7 @@ static int acdb_device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_LINE] = 10,
     [SND_DEVICE_OUT_HEADPHONES] = 10,
     [SND_DEVICE_OUT_HEADPHONES_DSD] = 10,
+    [SND_DEVICE_OUT_HEADPHONES_DOP] = 10,
     [SND_DEVICE_OUT_HEADPHONES_44_1] = 10,
     [SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES] = 10,
     [SND_DEVICE_OUT_SPEAKER_SAFE_AND_HEADPHONES] = 10,
@@ -1094,6 +1096,7 @@ static struct name_to_index snd_device_name_index[SND_DEVICE_MAX] = {
     {TO_NAME_INDEX(SND_DEVICE_OUT_BUS_SYS)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BUS_NAV)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BUS_PHN)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_HEADPHONES_DOP)},
     {TO_NAME_INDEX(SND_DEVICE_IN_HANDSET_MIC)},
     {TO_NAME_INDEX(SND_DEVICE_IN_HANDSET_MIC_SB)},
     {TO_NAME_INDEX(SND_DEVICE_IN_HANDSET_MIC_EXTERNAL)},
@@ -4191,6 +4194,10 @@ bool platform_check_backends_match(snd_device_t snd_device1, snd_device_t snd_de
     } else if (NULL != be_itf1 && NULL == be_itf2 && (NULL == strstr(be_itf1, default_rx_backend))) {
             result = false;
     }
+    /* The Hi-Fi DAC's ports (e.g. I2S and the DoP TDM port) share its pins */
+    if (!result && platform_get_backend_index(snd_device1) == HIFI_DAC_RX_BACKEND &&
+            platform_get_backend_index(snd_device2) == HIFI_DAC_RX_BACKEND)
+        result = true;
 
     ALOGV("%s: be_itf1 = %s, be_itf2 = %s, match %d", __func__, be_itf1, be_itf2, result);
     return result;
@@ -4932,7 +4939,8 @@ int platform_get_backend_index(snd_device_t snd_device)
                 else if ((strcmp(backend_tag_table[snd_device], "usb-headphones") == 0) ||
                            (strcmp(backend_tag_table[snd_device], "usb-headset") == 0))
                         port = USB_AUDIO_RX_BACKEND;
-                else if (strcmp(backend_tag_table[snd_device], "hifi-dac") == 0)
+                else if (strcmp(backend_tag_table[snd_device], "hifi-dac") == 0 ||
+                           strcmp(backend_tag_table[snd_device], "hifi-dop") == 0)
                         port = HIFI_DAC_RX_BACKEND;
         }
     } else if (snd_device >= SND_DEVICE_IN_BEGIN && snd_device < SND_DEVICE_IN_END) {
@@ -8263,6 +8271,9 @@ static int platform_set_codec_backend_cfg(struct audio_device* adev,
                  ret = mixer_ctl_set_enum_by_string(ctl, "S24_3LE");
             else
                  ret = mixer_ctl_set_enum_by_string(ctl, "S24_LE");
+            /* TDM ports have no packed format */
+            if (ret < 0 && backend_idx == HIFI_DAC_RX_BACKEND)
+                 ret = mixer_ctl_set_enum_by_string(ctl, "S24_LE");
         } else if (bit_width == 32) {
             ret = mixer_ctl_set_enum_by_string(ctl, "S32_LE");
         } else {
@@ -8667,7 +8678,12 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
     // For voice calls use default configuration i.e. 16b/48K, only applicable to
     // default backend
     // force routing is not required here, caller will do it anyway
-    if (backend_idx == platform_get_voice_call_backend(adev)) {
+    if (snd_device == SND_DEVICE_OUT_HEADPHONES_DOP && adev->hifi_dac_dop_out) {
+        /* Only the DoP stream reaches the DoP port */
+        bit_width = adev->hifi_dac_dop_out->bit_width;
+        sample_rate = adev->hifi_dac_dop_out->sample_rate;
+        channels = audio_channel_count_from_out_mask(adev->hifi_dac_dop_out->channel_mask);
+    } else if (backend_idx == platform_get_voice_call_backend(adev)) {
         ALOGW("%s:becf: afe:Use default bw and sr for voice/voip calls ",
               __func__);
         bit_width = CODEC_BACKEND_DEFAULT_BIT_WIDTH;
@@ -8734,8 +8750,9 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
             case 384000:
                 break;
             case 352800:
-                /* Not an MI2S rate */
-                sample_rate = 176400;
+                /* Not an MI2S rate; the DoP port (TDM) has it */
+                if (snd_device != SND_DEVICE_OUT_HEADPHONES_DOP)
+                    sample_rate = 176400;
                 break;
             default:
                 sample_rate = CODEC_BACKEND_DEFAULT_SAMPLE_RATE;

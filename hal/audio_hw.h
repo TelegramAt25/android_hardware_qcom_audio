@@ -422,6 +422,7 @@ struct stream_out {
 
     bool is_iec61937_info_available;
     bool a2dp_compress_mute;
+    int dop;  /* DoP content seen in the last writes: 0, 64 or 128 (DSD rate multiple) */
     float volume_l;
     float volume_r;
     bool apply_volume;
@@ -586,6 +587,8 @@ struct audio_device {
     struct stream_out *hifi_dac_vol_out;
     int hifi_dac_atten[2];
     bool hifi_dac_atten_known;
+    /* Stream that owns the Hi-Fi DAC's DoP port; the DAC's other streams are cut off */
+    struct stream_out *hifi_dac_dop_out;
     struct stream_out *voice_tx_output;
     struct stream_out *current_call_output;
     bool bluetooth_nrec;
