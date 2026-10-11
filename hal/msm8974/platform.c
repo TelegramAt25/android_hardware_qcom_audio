@@ -4932,6 +4932,8 @@ int platform_get_backend_index(snd_device_t snd_device)
                 else if ((strcmp(backend_tag_table[snd_device], "usb-headphones") == 0) ||
                            (strcmp(backend_tag_table[snd_device], "usb-headset") == 0))
                         port = USB_AUDIO_RX_BACKEND;
+                else if (strcmp(backend_tag_table[snd_device], "hifi-dac") == 0)
+                        port = HIFI_DAC_RX_BACKEND;
         }
     } else if (snd_device >= SND_DEVICE_IN_BEGIN && snd_device < SND_DEVICE_IN_END) {
         port = DEFAULT_CODEC_TX_BACKEND;
@@ -8588,6 +8590,33 @@ static void platform_check_hdmi_backend_cfg(struct audio_device* adev,
 }
 
 /*
+ * The Hi-Fi DAC backend has no fixed link: its controls follow the interface
+ * that the device routed to it uses, set at runtime.
+ */
+static void platform_update_hifi_dac_backend_ctls(struct platform_data *my_data,
+                                                  snd_device_t snd_device)
+{
+    codec_backend_cfg_t *cfg = &my_data->current_backend_cfg[HIFI_DAC_RX_BACKEND];
+    const char *itf = hw_interface_table[snd_device];
+    char ctl_name[MIXER_PATH_MAX_LENGTH];
+
+    if (itf == NULL)
+        return;
+    snprintf(ctl_name, sizeof(ctl_name), "%s SampleRate", itf);
+    if (cfg->samplerate_mixer_ctl != NULL && strcmp(cfg->samplerate_mixer_ctl, ctl_name) == 0)
+        return;
+
+    free(cfg->samplerate_mixer_ctl);
+    cfg->samplerate_mixer_ctl = strdup(ctl_name);
+    free(cfg->bitwidth_mixer_ctl);
+    snprintf(ctl_name, sizeof(ctl_name), "%s Format", itf);
+    cfg->bitwidth_mixer_ctl = strdup(ctl_name);
+    // Link state unknown (e.g. after a HAL restart): force the next write
+    cfg->sample_rate = 0;
+    cfg->bit_width = 0;
+}
+
+/*
  * goes through all the current usecases and picks the highest
  * bitwidth & samplerate
  */
@@ -8623,6 +8652,8 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
     }
 
     backend_idx = platform_get_backend_index(snd_device);
+    if (backend_idx == HIFI_DAC_RX_BACKEND)
+        platform_update_hifi_dac_backend_ctls(my_data, snd_device);
 
     bit_width = backend_cfg->bit_width;
     sample_rate = backend_cfg->sample_rate;
@@ -8691,8 +8722,28 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
         }
     }
 
-    /* Native playback is preferred for Headphone/HS device over 192Khz */
-    if (!voice_call_active && codec_device_supports_native_playback(usecase->devices)) {
+    if (backend_idx == HIFI_DAC_RX_BACKEND) {
+        /* External DAC on its own link: keep the stream's rate, 44.1 kHz family included */
+        switch (sample_rate) {
+            case 44100:
+            case 48000:
+            case 88200:
+            case 96000:
+            case 176400:
+            case 192000:
+            case 384000:
+                break;
+            case 352800:
+                /* Not an MI2S rate */
+                sample_rate = 176400;
+                break;
+            default:
+                sample_rate = CODEC_BACKEND_DEFAULT_SAMPLE_RATE;
+                break;
+        }
+        ALOGD("%s:becf: afe: Hi-Fi DAC backend at %d Hz", __func__, sample_rate);
+    } else if (!voice_call_active && codec_device_supports_native_playback(usecase->devices)) {
+        /* Native playback is preferred for Headphone/HS device over 192Khz */
         if (audio_is_true_native_stream_active(adev)) {
             if (check_hdset_combo_device(snd_device)) {
                 /*

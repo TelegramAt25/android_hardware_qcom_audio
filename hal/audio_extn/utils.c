@@ -1072,6 +1072,7 @@ int audio_extn_utils_get_app_sample_rate_for_device(
                                       usecase->stream.out->sample_rate,
                                       &usecase->stream.out->app_type_cfg.sample_rate);
         } else if (((snd_device != SND_DEVICE_OUT_HEADPHONES_44_1 &&
+                     platform_get_backend_index(snd_device) != HIFI_DAC_RX_BACKEND &&
                      !audio_is_this_native_usecase(usecase)) &&
             usecase->stream.out->sample_rate == OUTPUT_SAMPLING_RATE_44100) ||
             (usecase->stream.out->sample_rate < OUTPUT_SAMPLING_RATE_44100)) {
