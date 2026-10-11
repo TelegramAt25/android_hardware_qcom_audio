@@ -582,6 +582,10 @@ struct audio_device {
     audio_mode_t mode;
     audio_devices_t out_device;
     struct stream_out *primary_output;
+    /* Stream whose volume the Hi-Fi DAC applies (DSP at unity) */
+    struct stream_out *hifi_dac_vol_out;
+    int hifi_dac_atten[2];
+    bool hifi_dac_atten_known;
     struct stream_out *voice_tx_output;
     struct stream_out *current_call_output;
     bool bluetooth_nrec;

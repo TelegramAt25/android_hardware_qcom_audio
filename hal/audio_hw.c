@@ -96,6 +96,7 @@
 #define PCM_PLAYBACK_VOLUME_MAX 0x2000
 #define DSD_VOLUME_MIN_DB (-110)
 #define INVALID_OUT_VOLUME -1
+#define HIFI_DAC_ATTEN_CTL "Es9018 Playback Attenuation"
 
 #define RECORD_GAIN_MIN 0.0f
 #define RECORD_GAIN_MAX 1.0f
@@ -513,6 +514,8 @@ static int out_set_compr_volume(struct audio_stream_out *stream, float left, flo
 static int out_set_mmap_volume(struct audio_stream_out *stream, float left, float right);
 static int out_set_voip_volume(struct audio_stream_out *stream, float left, float right);
 static int out_set_pcm_volume(struct audio_stream_out *stream, float left, float right);
+static void hifi_dac_update_volume(struct audio_device *adev, struct audio_usecase *pending,
+                                   snd_device_t pending_snd, bool acquire);
 
 static void adev_snd_mon_cb(void *cookie, struct str_parms *parms);
 static void in_snd_mon_cb(void * stream, struct str_parms * parms);
@@ -2709,6 +2712,10 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
             out_snd_device = SND_DEVICE_OUT_SPEAKER;
     }
 
+    /* The DSP takes the stream volume back before anything else plays */
+    if (usecase->type != PCM_CAPTURE)
+        hifi_dac_update_volume(adev, usecase, out_snd_device, false);
+
     /* Disable current sound devices */
     if (usecase->out_snd_device != SND_DEVICE_NONE) {
         disable_audio_route(adev, usecase);
@@ -2851,6 +2858,9 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
                                             voip_out->app_type_cfg.app_type,
                                             &voip_out->app_type_cfg.gain[0]);
     }
+
+    if (usecase->type != PCM_CAPTURE)
+        hifi_dac_update_volume(adev, NULL, SND_DEVICE_NONE, true);
 
     ALOGD("%s: done",__func__);
 
@@ -3519,6 +3529,8 @@ static int stop_output_stream(struct stream_out *out)
             select_devices(adev, usecase->id);
         }
     }
+
+    hifi_dac_update_volume(adev, NULL, SND_DEVICE_NONE, true);
 
     free(uc_info);
     ALOGV("%s: exit: status(%d)", __func__, ret);
@@ -5116,6 +5128,8 @@ static int out_set_compr_volume(struct audio_stream_out *stream, float left,
               __func__, mixer_ctl_name);
         return -EINVAL;
     }
+    if (out == adev->hifi_dac_vol_out)
+        left = right = 1.0f;
     ALOGE("%s:ctl for mixer cmd - %s, left %f, right %f",
            __func__, mixer_ctl_name, left, right);
     volume[0] = (int)(left * COMPRESS_PLAYBACK_VOLUME_MAX);
@@ -5123,6 +5137,113 @@ static int out_set_compr_volume(struct audio_stream_out *stream, float left,
     mixer_ctl_set_array(ctl, volume, sizeof(volume)/sizeof(volume[0]));
 
     return 0;
+}
+
+/* Hi-Fi DAC attenuation in 0.5 dB steps (0xFF = −127.5 dB) */
+static int hifi_dac_atten_steps(float gain)
+{
+    int steps;
+
+    if (gain >= 1.0f)
+        return 0;
+    if (gain <= 0.0f)
+        return 0xFF;
+    steps = (int)lroundf(-40.0f * log10f(gain));
+    return steps > 0xFF ? 0xFF : steps;
+}
+
+static bool hifi_dac_set_atten(struct audio_device *adev, float left, float right)
+{
+    struct mixer_ctl *ctl;
+    long atten[2] = { hifi_dac_atten_steps(left), hifi_dac_atten_steps(right) };
+
+    if (adev->hifi_dac_atten_known && adev->hifi_dac_atten[0] == atten[0] &&
+            adev->hifi_dac_atten[1] == atten[1])
+        return true;
+
+    ctl = mixer_get_ctl_by_name(adev->mixer, HIFI_DAC_ATTEN_CTL);
+    if (!ctl || mixer_ctl_set_array(ctl, atten, ARRAY_SIZE(atten)) < 0) {
+        adev->hifi_dac_atten_known = false;
+        return false;
+    }
+    adev->hifi_dac_atten[0] = atten[0];
+    adev->hifi_dac_atten[1] = atten[1];
+    adev->hifi_dac_atten_known = true;
+    ALOGD("%s: Hi-Fi DAC attenuation %ld/%ld (0.5 dB)", __func__, atten[0], atten[1]);
+    return true;
+}
+
+/*
+ * A direct or offload stream that plays alone on the Hi-Fi DAC keeps the DSP at
+ * unity and gets its volume from the DAC. Anything else playing gives the volume
+ * back to the DSP. pending/pending_snd describe a routing change about to happen.
+ */
+static struct stream_out *hifi_dac_volume_owner(struct audio_device *adev,
+                                                struct audio_usecase *pending,
+                                                snd_device_t pending_snd)
+{
+    struct stream_out *owner = NULL;
+    struct audio_usecase *uc;
+    struct listnode *node;
+    snd_device_t snd;
+    int playing = 0;
+
+    list_for_each(node, &adev->usecase_list) {
+        uc = node_to_item(node, struct audio_usecase, list);
+        snd = uc == pending ? pending_snd : uc->out_snd_device;
+        if (uc->type == PCM_CAPTURE || snd == SND_DEVICE_NONE)
+            continue;
+        playing++;
+        if (uc->type == PCM_PLAYBACK && uc->stream.out &&
+                is_offload_usecase(uc->id) &&
+                !audio_extn_passthru_is_passthrough_stream(uc->stream.out) &&
+                uc->stream.out->format != AUDIO_FORMAT_DSD &&
+                is_valid_volume(uc->stream.out->volume_l, uc->stream.out->volume_r) &&
+                platform_get_backend_index(snd) == HIFI_DAC_RX_BACKEND)
+            owner = uc->stream.out;
+    }
+    return playing == 1 ? owner : NULL;
+}
+
+/* Called with adev->lock held */
+static void hifi_dac_update_volume(struct audio_device *adev, struct audio_usecase *pending,
+                                   snd_device_t pending_snd, bool acquire)
+{
+    struct stream_out *prev = adev->hifi_dac_vol_out;
+    struct stream_out *owner = hifi_dac_volume_owner(adev, pending, pending_snd);
+
+    if (owner != prev && !acquire)
+        owner = NULL;
+
+    // Volume moves so that both stages attenuate for a moment, never neither
+    if (prev && prev != owner) {
+        adev->hifi_dac_vol_out = NULL;
+        if (!prev->a2dp_compress_mute)
+            out_set_compr_volume(&prev->stream, prev->volume_l, prev->volume_r);
+        ALOGD("%s: DSP volume back for usecase %s", __func__, use_case_table[prev->usecase]);
+    }
+    if (owner) {
+        if (!hifi_dac_set_atten(adev, owner->volume_l, owner->volume_r)) {
+            if (owner == prev) {
+                adev->hifi_dac_vol_out = NULL;
+                out_set_compr_volume(&owner->stream, owner->volume_l, owner->volume_r);
+            }
+            ALOGW("%s: no Hi-Fi DAC volume control, DSP keeps the volume", __func__);
+            return;
+        }
+        if (owner != prev) {
+            adev->hifi_dac_vol_out = owner;
+            if (!owner->a2dp_compress_mute)
+                out_set_compr_volume(&owner->stream, owner->volume_l, owner->volume_r);
+            ALOGD("%s: Hi-Fi DAC volume for usecase %s", __func__, use_case_table[owner->usecase]);
+        }
+    } else if (prev || !adev->hifi_dac_atten_known ||
+               adev->hifi_dac_atten[0] || adev->hifi_dac_atten[1]) {
+        if (mixer_get_ctl_by_name(adev->mixer, HIFI_DAC_ATTEN_CTL))
+            hifi_dac_set_atten(adev, 1.0f, 1.0f);
+        else
+            adev->hifi_dac_atten_known = true;  // old kernel: nothing to reset
+    }
 }
 
 static int out_set_voip_volume(struct audio_stream_out *stream, float left,
@@ -5241,13 +5362,19 @@ static int out_set_volume(struct audio_stream_out *stream, float left,
             }
             return ret;
         } else {
+            struct audio_device *adev = out->dev;
+
+            pthread_mutex_lock(&adev->lock);
             pthread_mutex_lock(&out->compr_mute_lock);
             ALOGV("%s: compress mute %d", __func__, out->a2dp_compress_mute);
-            if (!out->a2dp_compress_mute)
-                ret = out_set_compr_volume(stream, left, right);
             out->volume_l = left;
             out->volume_r = right;
+            if (!out->a2dp_compress_mute)
+                ret = out_set_compr_volume(stream, left, right);
             pthread_mutex_unlock(&out->compr_mute_lock);
+            if (out == adev->hifi_dac_vol_out)
+                hifi_dac_update_volume(adev, NULL, SND_DEVICE_NONE, true);
+            pthread_mutex_unlock(&adev->lock);
             return ret;
         }
     } else if (out->usecase == USECASE_AUDIO_PLAYBACK_VOIP) {
