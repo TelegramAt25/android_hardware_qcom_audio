@@ -5318,21 +5318,31 @@ enum {
     DOP_SCAN_SILENT,
 };
 
-static bool hifi_dac_dop_capable(const struct stream_out *out)
+static bool hifi_dac_direct_hires(const struct stream_out *out)
 {
     return is_offload_usecase(out->usecase) &&
            !(out->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) &&
            (out->sample_rate == 176400 || out->sample_rate == 352800) &&
-           out->channel_mask == AUDIO_CHANNEL_OUT_STEREO &&
+           out->channel_mask == AUDIO_CHANNEL_OUT_STEREO;
+}
+
+static bool hifi_dac_dop_capable(const struct stream_out *out)
+{
+    return hifi_dac_direct_hires(out) &&
            (out->format == AUDIO_FORMAT_PCM_24_BIT_PACKED ||
             out->format == AUDIO_FORMAT_PCM_8_24_BIT ||
             out->format == AUDIO_FORMAT_PCM_32_BIT);
 }
 
-/* 352.8 kHz PCM for the DoP port, the DAC clocks it as with DoP128 */
+/*
+ * 352.8 kHz PCM for the DoP port, the DAC clocks it as with DoP128. Float (AAudio players)
+ * too: out_write() converts it to 24-bit before the port, it just can't carry DoP
+ */
 static bool hifi_dac_tdm_pcm(const struct stream_out *out)
 {
-    return !out->dop && out->sample_rate == 352800 && hifi_dac_dop_capable(out) &&
+    return !out->dop && out->sample_rate == 352800 &&
+           (hifi_dac_dop_capable(out) ||
+            (hifi_dac_direct_hires(out) && out->format == AUDIO_FORMAT_PCM_FLOAT)) &&
            property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true);
 }
 
