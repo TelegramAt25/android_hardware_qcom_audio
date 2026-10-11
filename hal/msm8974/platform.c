@@ -1498,7 +1498,7 @@ static int msm_be_id_array_len  =
 #endif
 
 #define DEEP_BUFFER_PLATFORM_DELAY (29*1000LL)
-#define PCM_OFFLOAD_PLATFORM_DELAY (30*1000LL)
+#define PCM_OFFLOAD_PLATFORM_DELAY (57*1000LL)   // DSP path delay, as reported by the ADSP
 #define LOW_LATENCY_PLATFORM_DELAY (13*1000LL)
 #define ULL_PLATFORM_DELAY         (3*1000LL)
 #define MMAP_PLATFORM_DELAY        (3*1000LL)

@@ -103,7 +103,7 @@
 
 /* ToDo: Check and update a proper value in msec */
 #define COMPRESS_OFFLOAD_PLAYBACK_LATENCY  50
-#define PCM_OFFLOAD_PLAYBACK_DSP_PATHDELAY 62
+#define PCM_OFFLOAD_PLAYBACK_DSP_PATHDELAY 57   // ASM path delay the DSP reports at every rate
 #define PCM_OFFLOAD_PLAYBACK_LATENCY \
     (PCM_OFFLOAD_BUFFER_DURATION + PCM_OFFLOAD_PLAYBACK_DSP_PATHDELAY)
 
@@ -2109,10 +2109,21 @@ int audio_extn_utils_compress_get_dsp_latency(struct stream_out *out)
     struct snd_compr_metadata metadata;
     int delay_ms = COMPRESS_OFFLOAD_PLAYBACK_LATENCY;
 
+    int ring_ms = 0;
+
     /* override the latency for pcm offload use case */
     if ((out->flags & AUDIO_OUTPUT_FLAG_DIRECT) &&
         !(out->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD)) {
         delay_ms = PCM_OFFLOAD_PLAYBACK_LATENCY;
+        // Every fragment of the kernel ring is queued ahead of the DSP
+        size_t frame_bytes = audio_bytes_per_sample(out->hal_op_format) *
+                             popcount(out->channel_mask);
+        if (frame_bytes && out->sample_rate) {
+            ring_ms = (int)((uint64_t)out->compr_config.fragment_size *
+                            out->compr_config.fragments * 1000 /
+                            (frame_bytes * out->sample_rate));
+            delay_ms = ring_ms + PCM_OFFLOAD_PLAYBACK_DSP_PATHDELAY;
+        }
     }
 
     if (property_get_bool("vendor.audio.playback.dsp.pathdelay", false)) {
@@ -2134,7 +2145,7 @@ int audio_extn_utils_compress_get_dsp_latency(struct stream_out *out)
             ALOGE("%s::error %s", __func__, compress_get_error(out->compr));
             goto exit;
         }
-        delay_ms = metadata.value[0] / 1000; /*convert to ms*/
+        delay_ms = ring_ms + metadata.value[0] / 1000; /*convert to ms*/
     } else {
         ALOGD("%s:: Using Fix DSP delay",__func__);
     }
