@@ -5457,9 +5457,10 @@ static void hifi_dac_check_link(struct audio_device *adev)
             (out->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD))
         return;
     platform_get_codec_backend_cfg(adev, out_uc->out_snd_device, &cfg);
-    // 352.8 kHz has no MI2S rate and runs the link at 176.4 kHz
-    rate = out->sample_rate == 352800 ? 176400 : out->sample_rate;
-    if (cfg.sample_rate == rate && cfg.bit_width >= out->bit_width)
+    rate = out->sample_rate;
+    // Older kernels run 352.8 kHz at 176.4 kHz (no MI2S rate)
+    if ((cfg.sample_rate == rate || (rate == 352800 && cfg.sample_rate == 176400)) &&
+            cfg.bit_width >= out->bit_width)
         return;
     ALOGD("%s: usecase %s at %u Hz/%u-bit alone on a %u Hz/%u-bit link, restarting it",
           __func__, use_case_table[out->usecase], out->sample_rate, out->bit_width,

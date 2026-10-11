@@ -8627,6 +8627,22 @@ static void platform_update_hifi_dac_backend_ctls(struct platform_data *my_data,
     cfg->bit_width = 0;
 }
 
+// Kernels before the Quad DAC's OSF bypass have no 352.8 kHz on MI2S
+static bool platform_hifi_dac_has_rate(struct platform_data *my_data, const char *rate_str)
+{
+    const char *name = my_data->current_backend_cfg[HIFI_DAC_RX_BACKEND].samplerate_mixer_ctl;
+    struct mixer_ctl *ctl = name ? mixer_get_ctl_by_name(my_data->adev->mixer, name) : NULL;
+    unsigned int i;
+
+    if (ctl == NULL)
+        return false;
+    for (i = 0; i < mixer_ctl_get_num_enums(ctl); i++) {
+        if (strcmp(mixer_ctl_get_enum_string(ctl, i), rate_str) == 0)
+            return true;
+    }
+    return false;
+}
+
 /*
  * goes through all the current usecases and picks the highest
  * bitwidth & samplerate
@@ -8748,10 +8764,11 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
             case 176400:
             case 192000:
             case 384000:
+                /* Above 192 kHz the DAC driver bypasses its oversampling filter (MCLK limit) */
                 break;
             case 352800:
-                /* Not an MI2S rate; the DoP port (TDM) has it */
-                if (snd_device != SND_DEVICE_OUT_HEADPHONES_DOP)
+                if (snd_device != SND_DEVICE_OUT_HEADPHONES_DOP &&
+                        !platform_hifi_dac_has_rate(my_data, "KHZ_352P8"))
                     sample_rate = 176400;
                 break;
             default:
