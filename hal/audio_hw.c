@@ -5377,19 +5377,22 @@ static bool hifi_dac_tdm_rate(uint32_t rate)
            rate == 48000 || rate == 96000 || rate == 192000;
 }
 
-/* 32-bit integer PCM that keeps all 32 bits on the DoP port (MI2S carries 24) */
+/*
+ * 32-bit integer PCM that keeps all 32 bits on the DoP port (MI2S carries 24), and float,
+ * which out_write() converts to 32-bit there without losing its low-level resolution
+ */
 static bool hifi_dac_tdm_32bit(audio_format_t format, uint32_t rate, audio_output_flags_t flags)
 {
-    return format == AUDIO_FORMAT_PCM_32_BIT && hifi_dac_tdm_rate(rate) &&
+    return (format == AUDIO_FORMAT_PCM_32_BIT || format == AUDIO_FORMAT_PCM_FLOAT) &&
+           hifi_dac_tdm_rate(rate) &&
            (flags & AUDIO_OUTPUT_FLAG_DIRECT) && !(flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) &&
            property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true);
 }
 
 /*
  * PCM for the DoP port, the DAC clocks it as with DoP: 352.8 kHz (no MI2S bit clock for it),
- * and 32-bit integer at any rate the DAC can clock (up to 192 kHz besides 352.8). Float
- * (AAudio players) at 352.8 kHz too: out_write() converts it to 24-bit before the port, it
- * just can't carry DoP
+ * and 32-bit integer or float at any rate the DAC can clock (up to 192 kHz besides 352.8).
+ * Float can't carry DoP
  */
 static bool hifi_dac_tdm_pcm(const struct stream_out *out)
 {
@@ -8127,7 +8130,8 @@ int adev_open_output_stream(struct audio_hw_device *dev,
             /*if hal input and output fragment size is different this indicates HAL input format is
              *not same as the alsa format
              */
-            if (out->hal_fragment_size != out->compr_config.fragment_size) {
+            if (out->hal_fragment_size != out->compr_config.fragment_size ||
+                    out->hal_ip_format != out->hal_op_format) {  // float to 32-bit: same size
                 /*Allocate a buffer to convert input data to the alsa configured format.
                  *size of convert buffer is equal to the size required to hold one fragment size
                  *worth of pcm data, this is because flinger does not write more than fragment_size
