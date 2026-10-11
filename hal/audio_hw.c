@@ -5458,7 +5458,7 @@ static void hifi_dac_check_link(struct audio_device *adev)
         return;
     platform_get_codec_backend_cfg(adev, out_uc->out_snd_device, &cfg);
     rate = out->sample_rate;
-    // Older kernels run 352.8 kHz at 176.4 kHz (no MI2S rate)
+    // MI2S runs 352.8 kHz at 176.4 kHz
     if ((cfg.sample_rate == rate || (rate == 352800 && cfg.sample_rate == 176400)) &&
             cfg.bit_width >= out->bit_width)
         return;
