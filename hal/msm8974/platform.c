@@ -8759,6 +8759,9 @@ static bool platform_check_codec_backend_cfg(struct audio_device* adev,
                 sample_rate = CODEC_BACKEND_DEFAULT_SAMPLE_RATE;
                 break;
         }
+        /* MI2S carries 24 bits at most, only the DoP port (TDM) takes 32 */
+        if (snd_device != SND_DEVICE_OUT_HEADPHONES_DOP && bit_width > 24)
+            bit_width = 24;
         ALOGD("%s:becf: afe: Hi-Fi DAC backend at %d Hz", __func__, sample_rate);
     } else if (!voice_call_active && codec_device_supports_native_playback(usecase->devices)) {
         /* Native playback is preferred for Headphone/HS device over 192Khz */

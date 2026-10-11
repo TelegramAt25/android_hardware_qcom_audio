@@ -5334,16 +5334,35 @@ static bool hifi_dac_dop_capable(const struct stream_out *out)
             out->format == AUDIO_FORMAT_PCM_32_BIT);
 }
 
+/* Rates the DAC can clock the DoP port at as PCM master (crystal / 2..16) */
+static bool hifi_dac_tdm_rate(uint32_t rate)
+{
+    return rate == 44100 || rate == 88200 || rate == 176400 || rate == 352800;
+}
+
+/* 32-bit integer PCM that keeps all 32 bits on the DoP port (MI2S carries 24) */
+static bool hifi_dac_tdm_32bit(audio_format_t format, uint32_t rate, audio_output_flags_t flags)
+{
+    return format == AUDIO_FORMAT_PCM_32_BIT && hifi_dac_tdm_rate(rate) &&
+           (flags & AUDIO_OUTPUT_FLAG_DIRECT) && !(flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) &&
+           property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true);
+}
+
 /*
- * 352.8 kHz PCM for the DoP port, the DAC clocks it as with DoP128. Float (AAudio players)
+ * PCM for the DoP port, the DAC clocks it as with DoP: 352.8 kHz (no MI2S bit clock for it),
+ * and 32-bit integer at any rate the DAC can clock. Float (AAudio players) at 352.8 kHz
  * too: out_write() converts it to 24-bit before the port, it just can't carry DoP
  */
 static bool hifi_dac_tdm_pcm(const struct stream_out *out)
 {
-    return !out->dop && out->sample_rate == 352800 &&
+    if (out->dop || !property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true))
+        return false;
+    if (out->bit_width == 32 && hifi_dac_tdm_32bit(out->format, out->sample_rate, out->flags) &&
+            is_offload_usecase(out->usecase) && out->channel_mask == AUDIO_CHANNEL_OUT_STEREO)
+        return true;
+    return out->sample_rate == 352800 &&
            (hifi_dac_dop_capable(out) ||
-            (hifi_dac_direct_hires(out) && out->format == AUDIO_FORMAT_PCM_FLOAT)) &&
-           property_get_bool("persist.vendor.audio.hifi.tdm_pcm", true);
+            (hifi_dac_direct_hires(out) && out->format == AUDIO_FORMAT_PCM_FLOAT));
 }
 
 /* DoP: both channels of a frame carry the same marker byte on top, 0x05 and 0xFA in turn */
@@ -5485,7 +5504,7 @@ static void hifi_dac_check_link(struct audio_device *adev)
     // MI2S runs 352.8 kHz at 176.4 kHz; alone, the stream can have the DoP port instead
     if ((cfg.sample_rate == rate ||
          (rate == 352800 && cfg.sample_rate == 176400 && !hifi_dac_tdm_pcm(out))) &&
-            cfg.bit_width >= out->bit_width)
+            (cfg.bit_width >= out->bit_width || (cfg.bit_width == 24 && !hifi_dac_tdm_pcm(out))))
         return;
     ALOGD("%s: usecase %s at %u Hz/%u-bit alone on a %u Hz/%u-bit link, restarting it",
           __func__, use_case_table[out->usecase], out->sample_rate, out->bit_width,
@@ -8041,6 +8060,9 @@ int adev_open_output_stream(struct audio_hw_device *dev,
              */
             out->compr_config.codec->format = hal_format_to_alsa(
                                               config->offload_info.format);
+            if (hifi_dac_tdm_32bit(config->offload_info.format,
+                                   config->offload_info.sample_rate, out->flags))
+                out->compr_config.codec->format = SNDRV_PCM_FORMAT_S32_LE;
 
             out->hal_op_format = alsa_format_to_hal(
                                                   out->compr_config.codec->format);
