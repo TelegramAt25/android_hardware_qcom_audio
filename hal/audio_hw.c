@@ -109,6 +109,7 @@
 /* DAC volume ramp to mute, and the DSP's soft resume ramp plus the DAC's DoP relock (by ear) */
 #define DOP_MUTE_RAMP_MS 300
 #define DOP_RESUME_RAMP_MS 300
+#define DOP_START_HOLD_MS 250
 
 #define RECORD_GAIN_MIN 0.0f
 #define RECORD_GAIN_MAX 1.0f
@@ -5964,6 +5965,8 @@ static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
         }
     }
 
+    bool dop_start_mute = false;
+
     if (hifi_dac_dop_capable(out)) {
         int scan = hifi_dac_dop_scan(out, buffer, bytes);
         int dop = scan == DOP_SCAN_DOP ? (out->sample_rate == 352800 ? 128 : 64) : 0;
@@ -6007,6 +6010,10 @@ static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
             goto exit;
         }
         out->started = 1;
+        // The DAC takes a moment to lock onto the markers: until then it plays DoP as PCM
+        if (out->dop && out == adev->hifi_dac_dop_out &&
+                property_get_int32("vendor.audio.hifi.dop_start_ms", DOP_START_HOLD_MS) > 0)
+            dop_start_mute = hifi_dac_dop_mute(out, true);
         if (last_known_cal_step != -1) {
             ALOGD("%s: retry previous failed cal level set", __func__);
             audio_hw_send_gain_dep_calibration(last_known_cal_step);
@@ -6132,6 +6139,13 @@ static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
             audio_extn_dts_notify_playback_state(out->usecase, 0, out->sample_rate,
                                                      popcount(out->channel_mask),
                                                      out->playback_started);
+        }
+        if (dop_start_mute && out->playback_started) {
+            pthread_mutex_unlock(&out->lock);
+            usleep(1000 * property_get_int32("vendor.audio.hifi.dop_start_ms", DOP_START_HOLD_MS));
+            lock_output_stream(out);
+            if (!out->standby)
+                hifi_dac_dop_mute(out, false);
         }
         pthread_mutex_unlock(&out->lock);
         ATRACE_END();
