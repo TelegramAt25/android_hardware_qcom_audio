@@ -5334,10 +5334,11 @@ static bool hifi_dac_dop_capable(const struct stream_out *out)
             out->format == AUDIO_FORMAT_PCM_32_BIT);
 }
 
-/* Rates the DAC can clock the DoP port at as PCM master (crystal / 2..16) */
+/* Rates the DAC can clock the DoP port at as PCM master (crystal / 2..16, or its NCO) */
 static bool hifi_dac_tdm_rate(uint32_t rate)
 {
-    return rate == 44100 || rate == 88200 || rate == 176400 || rate == 352800;
+    return rate == 44100 || rate == 88200 || rate == 176400 || rate == 352800 ||
+           rate == 48000 || rate == 96000 || rate == 192000;
 }
 
 /* 32-bit integer PCM that keeps all 32 bits on the DoP port (MI2S carries 24) */
@@ -5350,8 +5351,9 @@ static bool hifi_dac_tdm_32bit(audio_format_t format, uint32_t rate, audio_outpu
 
 /*
  * PCM for the DoP port, the DAC clocks it as with DoP: 352.8 kHz (no MI2S bit clock for it),
- * and 32-bit integer at any rate the DAC can clock. Float (AAudio players) at 352.8 kHz
- * too: out_write() converts it to 24-bit before the port, it just can't carry DoP
+ * and 32-bit integer at any rate the DAC can clock (up to 192 kHz besides 352.8). Float
+ * (AAudio players) at 352.8 kHz too: out_write() converts it to 24-bit before the port, it
+ * just can't carry DoP
  */
 static bool hifi_dac_tdm_pcm(const struct stream_out *out)
 {
