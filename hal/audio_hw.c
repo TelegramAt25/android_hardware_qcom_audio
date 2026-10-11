@@ -527,6 +527,7 @@ static snd_device_t hifi_dac_dop_snd_device(struct audio_device *adev, struct st
                                             snd_device_t snd_device, bool claim);
 static bool hifi_dac_dop_cut_off(struct audio_device *adev, struct audio_usecase *usecase);
 static void hifi_dac_dop_release(struct audio_device *adev);
+static void hifi_dac_check_link(struct audio_device *adev);
 static void hifi_dac_set_dop(struct audio_device *adev, int dop);
 
 static void adev_snd_mon_cb(void *cookie, struct str_parms *parms);
@@ -3569,6 +3570,8 @@ static int stop_output_stream(struct stream_out *out)
 
     if (out == adev->hifi_dac_dop_out)
         hifi_dac_dop_release(adev);
+    if (platform_get_backend_index(uc_info->out_snd_device) == HIFI_DAC_RX_BACKEND)
+        hifi_dac_check_link(adev);
     hifi_dac_update_volume(adev, NULL, SND_DEVICE_NONE, true);
 
     free(uc_info);
@@ -5425,6 +5428,45 @@ static bool hifi_dac_dop_mute(struct stream_out *out, bool mute)
 }
 
 /* Called with adev->lock held once the DoP stream's route is gone */
+/*
+ * Called with adev->lock held after a stream left the Hi-Fi DAC. A direct stream that
+ * joined while a mixer held the link runs at the mixer's rate/width (the DSP converts);
+ * once it is alone, its next write restarts it on a link of its own format.
+ */
+static void hifi_dac_check_link(struct audio_device *adev)
+{
+    struct stream_out *out = NULL;
+    struct audio_backend_cfg cfg;
+    struct audio_usecase *uc, *out_uc = NULL;
+    struct listnode *node;
+    unsigned int rate;
+
+    list_for_each(node, &adev->usecase_list) {
+        uc = node_to_item(node, struct audio_usecase, list);
+        if (uc->type == PCM_CAPTURE ||
+                platform_get_backend_index(uc->out_snd_device) != HIFI_DAC_RX_BACKEND)
+            continue;
+        if (out_uc || uc->type != PCM_PLAYBACK || !uc->stream.out)
+            return;
+        out_uc = uc;
+    }
+    if (!out_uc)
+        return;
+    out = out_uc->stream.out;
+    if (out->dop || !is_offload_usecase(out->usecase) ||
+            (out->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD))
+        return;
+    platform_get_codec_backend_cfg(adev, out_uc->out_snd_device, &cfg);
+    // 352.8 kHz has no MI2S rate and runs the link at 176.4 kHz
+    rate = out->sample_rate == 352800 ? 176400 : out->sample_rate;
+    if (cfg.sample_rate == rate && cfg.bit_width >= out->bit_width)
+        return;
+    ALOGD("%s: usecase %s at %u Hz/%u-bit alone on a %u Hz/%u-bit link, restarting it",
+          __func__, use_case_table[out->usecase], out->sample_rate, out->bit_width,
+          cfg.sample_rate, cfg.bit_width);
+    out->hifi_dac_relink = true;
+}
+
 static void hifi_dac_dop_release(struct audio_device *adev)
 {
     struct audio_usecase *uc;
@@ -5824,6 +5866,15 @@ static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
                 ret = -EIO;
                 goto exit;
             }
+        }
+    }
+
+    if (out->hifi_dac_relink) {
+        out->hifi_dac_relink = false;
+        if (!out->standby) {
+            pthread_mutex_unlock(&out->lock);
+            out_standby(&out->stream.common);
+            lock_output_stream(out);
         }
     }
 

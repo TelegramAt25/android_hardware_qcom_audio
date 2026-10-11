@@ -423,6 +423,7 @@ struct stream_out {
     bool is_iec61937_info_available;
     bool a2dp_compress_mute;
     int dop;  /* DoP content seen in the last writes: 0, 64 or 128 (DSD rate multiple) */
+    bool hifi_dac_relink;  /* the Hi-Fi DAC link no longer fits: restart on the next write */
     float volume_l;
     float volume_r;
     bool apply_volume;
