@@ -30,6 +30,7 @@
 #include "platform.h"
 #include "platform_api.h"
 #include <stdlib.h>
+#include <cutils/properties.h>
 #include <cutils/str_parms.h>
 #include <audio_extn.h>
 
@@ -62,6 +63,7 @@ static struct pcm_config pcm_config_fm = {
 struct fm_module {
     struct pcm *fm_pcm_rx;
     struct pcm *fm_pcm_tx;
+    struct pcm *fm_pcm_speaker;
     bool is_fm_running;
     bool is_fm_muted;
     float fm_volume;
@@ -73,6 +75,7 @@ struct fm_module {
 static struct fm_module fmmod = {
   .fm_pcm_rx = NULL,
   .fm_pcm_tx = NULL,
+  .fm_pcm_speaker = NULL,
   .fm_volume = 0,
   .is_fm_running = 0,
   .is_fm_muted = 0,
@@ -133,6 +136,10 @@ static int32_t fm_stop(struct audio_device *adev)
     fmmod.is_fm_running = false;
 
     /* 1. Close the PCM devices */
+    if (fmmod.fm_pcm_speaker) {
+        pcm_close(fmmod.fm_pcm_speaker);
+        fmmod.fm_pcm_speaker = NULL;
+    }
     if (fmmod.fm_pcm_rx) {
         pcm_close(fmmod.fm_pcm_rx);
         fmmod.fm_pcm_rx = NULL;
@@ -170,7 +177,7 @@ static int32_t fm_start(struct audio_device *adev, audio_devices_t outputDevices
     struct stream_out *fm_out;
     int32_t ret = 0;
     struct audio_usecase *uc_info;
-    int32_t pcm_dev_rx_id, pcm_dev_tx_id;
+    int32_t pcm_dev_rx_id, pcm_dev_tx_id, pcm_dev_speaker_id;
 
     ALOGD("%s: Start FM over output device %d ", __func__, outputDevices);
 
@@ -221,8 +228,9 @@ static int32_t fm_start(struct audio_device *adev, audio_devices_t outputDevices
     fmmod.fm_pcm_rx = pcm_open(adev->snd_card,
                                pcm_dev_rx_id,
                                PCM_OUT, &pcm_config_fm);
-    if (fmmod.fm_pcm_rx && !pcm_is_ready(fmmod.fm_pcm_rx)) {
-        ALOGE("%s: %s", __func__, pcm_get_error(fmmod.fm_pcm_rx));
+    if (!fmmod.fm_pcm_rx || !pcm_is_ready(fmmod.fm_pcm_rx)) {
+        ALOGE("%s: %s", __func__,
+              fmmod.fm_pcm_rx ? pcm_get_error(fmmod.fm_pcm_rx) : "PCM allocation failed");
         ret = -EIO;
         goto exit;
     }
@@ -232,13 +240,39 @@ static int32_t fm_start(struct audio_device *adev, audio_devices_t outputDevices
     fmmod.fm_pcm_tx = pcm_open(adev->snd_card,
                                pcm_dev_tx_id,
                                PCM_IN, &pcm_config_fm);
-    if (fmmod.fm_pcm_tx && !pcm_is_ready(fmmod.fm_pcm_tx)) {
-        ALOGE("%s: %s", __func__, pcm_get_error(fmmod.fm_pcm_tx));
+    if (!fmmod.fm_pcm_tx || !pcm_is_ready(fmmod.fm_pcm_tx)) {
+        ALOGE("%s: %s", __func__,
+              fmmod.fm_pcm_tx ? pcm_get_error(fmmod.fm_pcm_tx) : "PCM allocation failed");
         ret = -EIO;
         goto exit;
     }
-    pcm_start(fmmod.fm_pcm_rx);
-    pcm_start(fmmod.fm_pcm_tx);
+    pcm_dev_speaker_id = property_get_int32("vendor.audio.fm.speaker_pcm", -1);
+    // The external speaker endpoint replaces the SLIMBUS playback endpoint.
+    if (!(outputDevices & AUDIO_DEVICE_OUT_SPEAKER) || pcm_dev_speaker_id < 0) {
+        ret = pcm_start(fmmod.fm_pcm_rx);
+        if (ret < 0)
+            goto exit;
+    }
+    ret = pcm_start(fmmod.fm_pcm_tx);
+    if (ret < 0)
+        goto exit;
+
+    // Some external speakers need a separate hostless playback endpoint for FM.
+    if ((outputDevices & AUDIO_DEVICE_OUT_SPEAKER) && pcm_dev_speaker_id >= 0) {
+        ALOGD("%s: Opening FM speaker PCM device %d", __func__, pcm_dev_speaker_id);
+        fmmod.fm_pcm_speaker = pcm_open(adev->snd_card, pcm_dev_speaker_id,
+                                      PCM_OUT, &pcm_config_fm);
+        if (!fmmod.fm_pcm_speaker || !pcm_is_ready(fmmod.fm_pcm_speaker)) {
+            ALOGE("%s: FM speaker PCM: %s", __func__,
+                  fmmod.fm_pcm_speaker ? pcm_get_error(fmmod.fm_pcm_speaker)
+                                       : "PCM allocation failed");
+            ret = -EIO;
+            goto exit;
+        }
+        ret = pcm_start(fmmod.fm_pcm_speaker);
+        if (ret < 0)
+            goto exit;
+    }
 
     fmmod.fm_device = fm_out->devices;
 
